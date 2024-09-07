@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Chart Music Visualizer</title>
+    <style>
+        body { margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; background: #000; font-family: Arial, sans-serif; }
+        #visualizer { border: 1px solid #333; }
+        #audioInputLabel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 10px 20px;
+            background-color: #2c3e50;
+            color: white;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        #audioInputLabel:hover {
+            background-color: #34495e;
+        }
+        #audioInput {
+            display: none;
+        }
+        #currentFile {
+            position: absolute;
+            top: 10px;
+            left: 150px;
+            color: white;
+            font-size: 16px;
+            padding: 10px;
+            background-color: rgba(44, 62, 80, 0.7);
+            border-radius: 5px;
+        }
+        .controls {
+            position: absolute;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+        }
+        .button {
+            padding: 10px 20px;
+            font-size: 18px;
+            cursor: pointer;
+            border: none;
+            color: white;
+            transition: background-color 0.3s, transform 0.1s;
+            border-radius: 25px;
+            outline: none;
+        }
+        #prevBtn, #nextBtn { background-color: #3498db; }
+        #playPauseBtn { background-color: #4CAF50; }
+        #playPauseBtn.sell { background-color: #f44336; }
+        .button:active { transform: scale(0.95); }
+        #progressContainer {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 200px;
+            height: 20px;
+            background-color: rgba(44, 62, 80, 0.7);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        #progressBar {
+            height: 100%;
+            width: 0%;
+            background-color: #3498db;
+            transition: width 0.1s linear;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="visualizer"></canvas>
+    <label for="audioInput" id="audioInputLabel">Browse Folder</label>
+    <input type="file" id="audioInput" accept="audio/*" webkitdirectory directory multiple>
+    <div id="currentFile"></div>
+    <div id="progressContainer">
+        <div id="progressBar"></div>
+    </div>
+    <div class="controls">
+        <button id="prevBtn" class="button">⏮</button>
+        <button id="playPauseBtn" class="button">Buy</button>
+        <button id="nextBtn" class="button">⏭</button>
+    </div>
+    <script>
+        const canvas = document.getElementById('visualizer');
+        const ctx = canvas.getContext('2d');
+        const audioInput = document.getElementById('audioInput');
+        const playPauseBtn = document.getElementById('playPauseBtn');
+        const prevBtn = document.getElementById('prevBtn');
+        const nextBtn = document.getElementById('nextBtn');
+        const currentFileDisplay = document.getElementById('currentFile');
+        const progressBar = document.getElementById('progressBar');
+
+        let audioContext, analyser, source;
+        let dataArray, bufferLength;
+        let previousDataArray;
+        let smoothedDataArray, smoothedWickArray;
+        const smoothingFactor = 0.3;
+        const wickSmoothingFactor = 0.1;
+        const maxBarHeight = canvas.height * 1.5; 
+        const maxWickHeight = canvas.height * 0.9; 
+
+        canvas.width = window.innerWidth - 20;
+        canvas.height = window.innerHeight - 20;
+
+        let isPlaying = false;
+        let audioBuffer;
+        let audioFiles = [];
+        let currentFileIndex = 0;
+
+        let basePrice = 10000;
+        let currentPrice = basePrice;
+        const priceVolatility = 50;
+        let currentDate = new Date();
+
+        let animationId; // Add this variable to store the animation frame ID
+        let startTime;
+
+        audioInput.addEventListener('change', function(e) {
+            audioFiles = Array.from(e.target.files).filter(file => file.type.startsWith('audio/'));
+            if (audioFiles.length > 0) {
+                loadAudioFile(audioFiles[currentFileIndex]);
+            }
+        });
+
+        playPauseBtn.addEventListener('click', togglePlayPause);
+        prevBtn.addEventListener('click', playPreviousSong);
+        nextBtn.addEventListener('click', playNextSong);
+
+        function loadAudioFile(file) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                setupAudio(e.target.result);
+            }
+            reader.readAsArrayBuffer(file);
+            currentFileDisplay.textContent = file.name; // Display the current file name
+        }
+
+        function setupAudio(arrayBuffer) {
+            if (audioContext) audioContext.close();
+
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioContext.createAnalyser();
+            
+            audioContext.decodeAudioData(arrayBuffer, function(buffer) {
+                audioBuffer = buffer;
+                createSourceAndPlay();
+                
+                // Add event listener for when the audio ends
+                source.onended = handleAudioEnd;
+            });
+        }
+
+        function createSourceAndPlay() {
+            if (source) {
+                source.stop();
+                source.disconnect();
+            }
+            source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(analyser);
+            analyser.connect(audioContext.destination);
+            source.start(0);
+            startTime = audioContext.currentTime;
+            isPlaying = true;
+            updatePlayPauseButton();
+
+            analyser.fftSize = 64;
+            bufferLength = analyser.frequencyBinCount;
+            dataArray = new Uint8Array(bufferLength);
+            previousDataArray = new Uint8Array(bufferLength);
+            smoothedDataArray = new Uint8Array(bufferLength).fill(128);
+            smoothedWickArray = new Uint8Array(bufferLength).fill(128);
+
+            draw();
+        }
+
+        function togglePlayPause() {
+            if (isPlaying) {
+                audioContext.suspend();
+                playPauseBtn.textContent = 'Buy';
+                playPauseBtn.classList.remove('sell');
+                cancelAnimationFrame(animationId); // Stop the animation
+            } else {
+                audioContext.resume();
+                playPauseBtn.textContent = 'Sell';
+                playPauseBtn.classList.add('sell');
+                startTime += audioContext.currentTime - (startTime + audioContext.currentTime - startTime);
+                draw(); // Restart the animation
+            }
+            isPlaying = !isPlaying;
+        }
+
+        function playPreviousSong() {
+            currentFileIndex = (currentFileIndex - 1 + audioFiles.length) % audioFiles.length;
+            loadAudioFile(audioFiles[currentFileIndex]);
+        }
+
+        function playNextSong() {
+            currentFileIndex = (currentFileIndex + 1) % audioFiles.length;
+            loadAudioFile(audioFiles[currentFileIndex]);
+        }
+
+        function draw() {
+            animationId = requestAnimationFrame(draw);
+
+            if (!isPlaying) {
+                return; // Don't update anything if not playing
+            }
+
+            analyser.getByteFrequencyData(dataArray);
+
+            // Clear the canvas
+            ctx.fillStyle = 'rgba(0, 10, 20, 1)';  // Dark blue background
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw grid lines
+            drawGrid();
+
+            const margin = canvas.width * 0.1; // 10% margin on each side
+            const usableWidth = canvas.width - 2 * margin;
+            const barWidth = (usableWidth / bufferLength) * 0.6; // Reduce this to make bars thinner
+            const spacing = (usableWidth - barWidth * bufferLength) / (bufferLength + 1); // Calculate spacing
+            let x = margin + spacing; // Start with margin + spacing
+
+            for (let i = 0; i < bufferLength; i++) {
+                // Smooth the data for bars and wicks
+                smoothedDataArray[i] = smoothedDataArray[i] * (1 - smoothingFactor) + dataArray[i] * smoothingFactor;
+                smoothedWickArray[i] = smoothedWickArray[i] * (1 - wickSmoothingFactor) + dataArray[i] * wickSmoothingFactor;
+                
+                const barHeight = (smoothedDataArray[i] / 255) * maxBarHeight;
+                const centerY = canvas.height / 2;
+
+                // Calculate wick heights with more variety
+                const topWickHeight = Math.min(maxWickHeight, Math.max(5, (smoothedWickArray[i] / 255) * maxWickHeight * (0.5 + Math.random() * 0.5)));
+                const bottomWickHeight = Math.min(maxWickHeight, Math.max(5, (smoothedWickArray[i] / 255) * maxWickHeight * (0.5 + Math.random() * 0.5)));
+
+                // Check if the bar is active (has a significant audio signal)
+                const isActive = smoothedDataArray[i] > 10; // Adjust this threshold as needed
+
+                if (isActive) {
+                    if (smoothedDataArray[i] > previousDataArray[i]) {
+                        ctx.fillStyle = 'rgba(100, 230, 100, 0.7)';  // Pastel green
+                        ctx.strokeStyle = 'rgb(120, 255, 120)';      // Slightly brighter for the outline
+                    } else {
+                        ctx.fillStyle = 'rgba(230, 100, 100, 0.7)';  // Pastel red
+                        ctx.strokeStyle = 'rgb(255, 120, 120)';      // Slightly brighter for the outline
+                    }
+
+                    // Draw glow effect
+                    const glowSize = 10;
+                    const gradient = ctx.createRadialGradient(
+                        x + barWidth / 2, centerY, 0,
+                        x + barWidth / 2, centerY, barWidth / 2 + glowSize
+                    );
+                    gradient.addColorStop(0, ctx.fillStyle);
+                    gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+                    ctx.fillStyle = gradient;
+
+                    // Draw the main bar with glow
+                    ctx.fillRect(x - glowSize, centerY - barHeight / 2 - glowSize, barWidth + glowSize * 2, barHeight + glowSize * 2);
+
+                    // Draw the actual bar
+                    ctx.fillStyle = ctx.strokeStyle;
+                    ctx.fillRect(x, centerY - barHeight / 2, barWidth, barHeight);
+
+                    // Draw wicks
+                    ctx.beginPath();
+                    ctx.moveTo(x + barWidth / 2, centerY - barHeight / 2);
+                    ctx.lineTo(x + barWidth / 2, centerY - barHeight / 2 - topWickHeight);
+                    ctx.moveTo(x + barWidth / 2, centerY + barHeight / 2);
+                    ctx.lineTo(x + barWidth / 2, centerY + barHeight / 2 + bottomWickHeight);
+                    ctx.stroke();
+                } else {
+                    // Draw inactive bar (no glow, no color)
+                    ctx.fillStyle = 'rgba(100, 100, 100, 0.3)';  // Dim gray for inactive bars
+                    ctx.fillRect(x, centerY - 1, barWidth, 2);  // Draw a thin line for inactive bars
+                }
+
+                x += barWidth + spacing; // Move to next bar position with spacing
+            }
+
+            previousDataArray.set(smoothedDataArray);
+            updatePrice();
+            currentDate.setMinutes(currentDate.getMinutes() + 1); // Increment date
+
+            // Draw price and date axes after the bars
+            drawPriceAxis();
+            drawDateAxis();
+
+            // Update button color based on price movement
+            updatePlayPauseButton();
+
+            // Update progress bar
+            const currentTime = audioContext.currentTime - startTime;
+            const duration = audioBuffer.duration;
+            const progress = (currentTime / duration) * 100;
+            progressBar.style.width = `${progress}%`;
+        }
+
+        function drawGrid() {
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+            ctx.lineWidth = 0.5;
+
+            // Vertical lines
+            for (let x = 0; x <= canvas.width; x += canvas.width / 10) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, canvas.height);
+                ctx.stroke();
+            }
+
+            // Horizontal lines
+            for (let y = 0; y <= canvas.height; y += canvas.height / 8) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvas.width, y);
+                ctx.stroke();
+            }
+        }
+
+        function drawPriceAxis() {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+            ctx.font = '12px Arial';
+            ctx.textAlign = 'right';
+
+            for (let i = 0; i <= 8; i++) {
+                const y = (canvas.height / 8) * i;
+                const price = basePrice + (4 - i) * 100;
+                ctx.fillText('$' + price.toFixed(2), canvas.width - 10, y + 4);
+            }
+        }
+
+        function drawDateAxis() {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+            ctx.font = '12px Arial';
+            ctx.textAlign = 'center';
+
+            for (let i = 0; i <= 10; i++) {
+                const x = (canvas.width / 10) * i;
+                const date = new Date(currentDate);
+                date.setMinutes(date.getMinutes() - (10 - i) * 6);
+                const dateString = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                ctx.fillText(dateString, x, canvas.height - 5);
+            }
+        }
+
+        function updatePrice() {
+            const priceChange = (Math.random() - 0.5) * 2 * priceVolatility;
+            currentPrice += priceChange;
+            basePrice = currentPrice;
+        }
+
+        function updatePlayPauseButton() {
+            if (currentPrice > basePrice) {
+                playPauseBtn.classList.remove('sell');
+                playPauseBtn.textContent = 'Buy';
+            } else {
+                playPauseBtn.classList.add('sell');
+                playPauseBtn.textContent = 'Sell';
+            }
+        }
+
+        function handleAudioEnd() {
+            isPlaying = false;
+            playPauseBtn.textContent = 'Buy';
+            playPauseBtn.classList.remove('sell');
+            cancelAnimationFrame(animationId);
+            progressBar.style.width = '0%';
+        }
+    </script>
+</body>
+</html>
